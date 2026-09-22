@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -37,7 +38,7 @@ CREATE TABLE IF NOT EXISTS products (
     title TEXT NOT NULL,
     chinese_title TEXT,
     description TEXT,
-    price REAL NOT NULL DEFAULT 0,
+    price_cents INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     featured INTEGER NOT NULL DEFAULT 0,
     mix_eligible INTEGER NOT NULL DEFAULT 0,
@@ -60,15 +61,15 @@ CREATE TABLE IF NOT EXISTS vouchers (
     code TEXT NOT NULL UNIQUE,
     title TEXT NOT NULL,
     discount_type TEXT NOT NULL,
-    value REAL NOT NULL,
-    min_spend REAL NOT NULL DEFAULT 0,
-    valid_days INTEGER,
-    starts_at TEXT,
-    ends_at TEXT,
-    max_uses_per_customer INTEGER NOT NULL DEFAULT 1,
+    value REAL NOT NULL DEFAULT 0,
+    min_spend_cents INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
     new_user_only INTEGER NOT NULL DEFAULT 0,
     auto_assign_new_user INTEGER NOT NULL DEFAULT 0,
-    active INTEGER NOT NULL DEFAULT 1,
+    valid_days INTEGER NOT NULL DEFAULT 14,
+    starts_at TEXT,
+    ends_at TEXT,
+    usage_limit_per_customer INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -79,10 +80,12 @@ CREATE TABLE IF NOT EXISTS customer_vouchers (
     voucher_id TEXT NOT NULL,
     assigned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     expires_at TEXT,
+    used_count INTEGER NOT NULL DEFAULT 0,
     used_at TEXT,
     order_id TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (voucher_id) REFERENCES vouchers(id) ON DELETE CASCADE
+    FOREIGN KEY (voucher_id) REFERENCES vouchers(id) ON DELETE CASCADE,
+    UNIQUE(user_id, voucher_id)
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -99,9 +102,9 @@ CREATE TABLE IF NOT EXISTS orders (
     pickup_time TEXT NOT NULL,
     note TEXT,
 
-    subtotal REAL NOT NULL DEFAULT 0,
-    discount REAL NOT NULL DEFAULT 0,
-    total REAL NOT NULL DEFAULT 0,
+    subtotal_cents INTEGER NOT NULL DEFAULT 0,
+    discount_cents INTEGER NOT NULL DEFAULT 0,
+    total_cents INTEGER NOT NULL DEFAULT 0,
 
     voucher_id TEXT,
 
@@ -109,7 +112,7 @@ CREATE TABLE IF NOT EXISTS orders (
     payment_status TEXT NOT NULL DEFAULT 'checking',
     receipt_key TEXT,
 
-    status TEXT NOT NULL DEFAULT 'new',
+    order_status TEXT NOT NULL DEFAULT 'new',
 
     points_awarded INTEGER NOT NULL DEFAULT 0,
 
@@ -126,17 +129,19 @@ CREATE TABLE IF NOT EXISTS order_items (
     product_id TEXT,
     product_title TEXT NOT NULL,
     quantity INTEGER NOT NULL DEFAULT 1,
-    unit_price REAL NOT NULL DEFAULT 0,
-    line_total REAL NOT NULL DEFAULT 0,
+    unit_price_cents INTEGER NOT NULL DEFAULT 0,
+    line_total_cents INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+    FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
+    FOREIGN KEY (product_id) REFERENCES products(id)
 );
 
 CREATE TABLE IF NOT EXISTS points_ledger (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     order_id TEXT,
-    amount INTEGER NOT NULL,
+    delta INTEGER NOT NULL,
     reason TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -144,69 +149,89 @@ CREATE TABLE IF NOT EXISTS points_ledger (
     FOREIGN KEY (order_id) REFERENCES orders(id)
 );
 
-CREATE TABLE IF NOT EXISTS store_settings (
-    setting_key TEXT PRIMARY KEY,
-    setting_value TEXT,
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT OR IGNORE INTO store_settings
-(setting_key, setting_value)
-VALUES
-('store_name', 'LAYOR Dessert');
-
-INSERT OR IGNORE INTO store_settings
-(setting_key, setting_value)
-VALUES
-('payment_method', 'manual');
-
-INSERT OR IGNORE INTO store_settings
-(setting_key, setting_value)
+INSERT OR IGNORE INTO settings
+(key, value)
 VALUES
 ('bank_name', '');
 
-INSERT OR IGNORE INTO store_settings
-(setting_key, setting_value)
+INSERT OR IGNORE INTO settings
+(key, value)
 VALUES
-('bank_account_name', 'LAYOR DESSERT');
+('account_name', 'LAYOR DESSERT');
 
-INSERT OR IGNORE INTO store_settings
-(setting_key, setting_value)
+INSERT OR IGNORE INTO settings
+(key, value)
 VALUES
-('bank_account_number', '');
+('account_number', '');
 
-INSERT OR IGNORE INTO store_settings
-(setting_key, setting_value)
+INSERT OR IGNORE INTO settings
+(key, value)
 VALUES
 ('payment_qr_key', '');
 
-INSERT OR IGNORE INTO store_settings
-(setting_key, setting_value)
+INSERT OR IGNORE INTO settings
+(key, value)
 VALUES
 ('points_enabled', '1');
 
-INSERT OR IGNORE INTO store_settings
-(setting_key, setting_value)
+INSERT OR IGNORE INTO settings
+(key, value)
 VALUES
 ('points_per_rm', '1');
 
-CREATE INDEX IF NOT EXISTS idx_products_category
+CREATE INDEX IF NOT EXISTS idx_users_email
+ON users(email);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_token_hash
+ON sessions(token_hash);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id
+ON sessions(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_categories_active
+ON categories(active);
+
+CREATE INDEX IF NOT EXISTS idx_products_category_id
 ON products(category_id);
 
 CREATE INDEX IF NOT EXISTS idx_products_active
 ON products(active);
 
-CREATE INDEX IF NOT EXISTS idx_orders_user
-ON orders(user_id);
+CREATE INDEX IF NOT EXISTS idx_products_featured
+ON products(featured);
 
-CREATE INDEX IF NOT EXISTS idx_orders_status
-ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_product_images_product_id
+ON product_images(product_id);
 
-CREATE INDEX IF NOT EXISTS idx_orders_created
-ON orders(created_at);
+CREATE INDEX IF NOT EXISTS idx_vouchers_active
+ON vouchers(active);
 
-CREATE INDEX IF NOT EXISTS idx_customer_vouchers_user
+CREATE INDEX IF NOT EXISTS idx_customer_vouchers_user_id
 ON customer_vouchers(user_id);
 
-CREATE INDEX IF NOT EXISTS idx_sessions_user
-ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_customer_vouchers_voucher_id
+ON customer_vouchers(voucher_id);
+
+CREATE INDEX IF NOT EXISTS idx_orders_user_id
+ON orders(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_orders_order_status
+ON orders(order_status);
+
+CREATE INDEX IF NOT EXISTS idx_orders_payment_status
+ON orders(payment_status);
+
+CREATE INDEX IF NOT EXISTS idx_orders_created_at
+ON orders(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_order_items_order_id
+ON order_items(order_id);
+
+CREATE INDEX IF NOT EXISTS idx_points_ledger_user_id
+ON points_ledger(user_id);
