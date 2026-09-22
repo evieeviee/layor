@@ -10,6 +10,20 @@
     "run_worker_first": [
       "/api/*"
     ]
-  }
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "layor-db",
+      "database_id": "607fbaa6-ab34-4e5f-b55e-a80b08737920"
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "layor-media"
+    }
+  ]
 }
- 
