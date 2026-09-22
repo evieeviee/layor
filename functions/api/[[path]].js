@@ -202,6 +202,17 @@ export async function onRequest(context) {
           return adminCreateVoucher(request, env);
         }
 
+        if (
+          parts[2] &&
+          parts[3] === 'assign-all' &&
+          method === 'POST'
+        ) {
+          return adminAssignVoucherToAll(
+            env,
+            parts[2]
+          );
+        }
+
         if (parts[2] && method === 'PUT') {
           return adminUpdateVoucher(
             request,
@@ -241,7 +252,10 @@ export async function onRequest(context) {
     }
 
     return json(
-      { error: 'Server error' },
+      {
+        error: 'Server error',
+        detail: String(err?.message || err || '')
+      },
       500
     );
   }
@@ -415,8 +429,7 @@ function cookieValue(
     request.headers.get('Cookie') || '';
 
   const parts =
-    raw
-      .split(';')
+    raw.split(';')
       .map(x => x.trim());
 
   for (const p of parts) {
@@ -451,8 +464,8 @@ function sessionCookie(
 function clearCookie() {
   return (
     `${SESSION_COOKIE}=; ` +
-    `HttpOnly; Secure; SameSite=Lax; ` +
-    `Path=/; Max-Age=0`
+    `HttpOnly; Secure; ` +
+    `SameSite=Lax; Path=/; Max-Age=0`
   );
 }
 
@@ -460,13 +473,13 @@ function publicUser(u) {
   return {
     id: u.id,
     email: u.email,
-    full_name:
-      u.full_name || '',
+    full_name: u.full_name || '',
+    phone: u.phone || '',
     role: u.role,
-    points:
-      Number(u.points || 0),
-    created_at:
-      u.created_at
+    points: Number(
+      u.points || 0
+    ),
+    created_at: u.created_at
   };
 }
 
@@ -485,12 +498,11 @@ async function createSession(
   env,
   userId
 ) {
-  const raw =
-    base64url(
-      crypto.getRandomValues(
-        new Uint8Array(32)
-      )
-    );
+  const raw = base64url(
+    crypto.getRandomValues(
+      new Uint8Array(32)
+    )
+  );
 
   const tokenHash =
     await sha256Text(raw);
@@ -498,16 +510,20 @@ async function createSession(
   const expires =
     new Date(
       Date.now() +
-      SESSION_DAYS *
-      86400000
+      SESSION_DAYS * 86400000
     ).toISOString();
 
-  await env.DB
-    .prepare(
-      `INSERT INTO sessions
-       (id,user_id,token_hash,expires_at)
-       VALUES(?,?,?,?)`
+  await env.DB.prepare(
+    `
+    INSERT INTO sessions(
+      id,
+      user_id,
+      token_hash,
+      expires_at
     )
+    VALUES(?,?,?,?)
+    `
+  )
     .bind(
       id(),
       userId,
@@ -537,15 +553,17 @@ async function currentUser(
     await sha256Text(raw);
 
   const row =
-    await env.DB
-      .prepare(
-        `SELECT u.*
-         FROM sessions s
-         JOIN users u
-           ON u.id=s.user_id
-         WHERE s.token_hash=?
-         AND s.expires_at>?`
-      )
+    await env.DB.prepare(
+      `
+      SELECT u.*
+      FROM sessions s
+      JOIN users u
+        ON u.id=s.user_id
+      WHERE
+        s.token_hash=?
+        AND s.expires_at>?
+      `
+    )
       .bind(
         tokenHash,
         nowIso()
@@ -606,17 +624,29 @@ async function register(
     normEmail(b.email);
 
   const password =
-    String(b.password || '');
+    String(
+      b.password || ''
+    );
 
   const fullName =
     String(
       b.full_name || ''
     ).trim();
 
+  const phone =
+    String(
+      b.phone || ''
+    ).trim();
+
+  if (!fullName) {
+    throw new HttpError(
+      400,
+      'Full name is required'
+    );
+  }
+
   if (
-    !/^\S+@\S+\.\S+$/.test(
-      email
-    )
+    !/^\S+@\S+\.\S+$/.test(email)
   ) {
     throw new HttpError(
       400,
@@ -624,7 +654,22 @@ async function register(
     );
   }
 
-  if (password.length < 8) {
+  if (
+    !phone ||
+    phone.replace(
+      /\D/g,
+      ''
+    ).length < 8
+  ) {
+    throw new HttpError(
+      400,
+      'Enter a valid phone number'
+    );
+  }
+
+  if (
+    password.length < 8
+  ) {
     throw new HttpError(
       400,
       'Password must be at least 8 characters'
@@ -632,10 +677,13 @@ async function register(
   }
 
   const exists =
-    await env.DB
-      .prepare(
-        'SELECT id FROM users WHERE email=?'
-      )
+    await env.DB.prepare(
+      `
+      SELECT id
+      FROM users
+      WHERE email=?
+      `
+    )
       .bind(email)
       .first();
 
@@ -652,33 +700,33 @@ async function register(
     );
 
   const userId = id();
-  const createdAt =
-    nowIso();
+  const createdAt = nowIso();
 
-  await env.DB
-    .prepare(
-      `INSERT INTO users
-       (
-         id,
-         email,
-         password_hash,
-         password_salt,
-         full_name,
-         role,
-         points,
-         created_at
-       )
-       VALUES(
-         ?,?,?,?,?,?,0,?
-       )`
+  await env.DB.prepare(
+    `
+    INSERT INTO users(
+      id,
+      email,
+      password_hash,
+      password_salt,
+      full_name,
+      phone,
+      role,
+      points,
+      created_at
     )
+    VALUES(
+      ?,?,?,?,?,?,?,0,?
+    )
+    `
+  )
     .bind(
       userId,
       email,
       hp.hash,
       hp.salt,
-      fullName ||
-        email.split('@')[0],
+      fullName,
+      phone,
       'customer',
       createdAt
     )
@@ -696,17 +744,19 @@ async function register(
     );
 
   const user =
-    await env.DB
-      .prepare(
-        'SELECT * FROM users WHERE id=?'
-      )
+    await env.DB.prepare(
+      `
+      SELECT *
+      FROM users
+      WHERE id=?
+      `
+    )
       .bind(userId)
       .first();
 
   return json(
     {
-      user:
-        publicUser(user)
+      user: publicUser(user)
     },
     201,
     {
@@ -734,10 +784,13 @@ async function login(
     );
 
   const user =
-    await env.DB
-      .prepare(
-        'SELECT * FROM users WHERE email=?'
-      )
+    await env.DB.prepare(
+      `
+      SELECT *
+      FROM users
+      WHERE email=?
+      `
+    )
       .bind(email)
       .first();
 
@@ -765,8 +818,7 @@ async function login(
 
   return json(
     {
-      user:
-        publicUser(user)
+      user: publicUser(user)
     },
     200,
     {
@@ -789,19 +841,23 @@ async function logout(
     );
 
   if (raw) {
-    await env.DB
-      .prepare(
-        `DELETE FROM sessions
-         WHERE token_hash=?`
-      )
-      .bind(
-        await sha256Text(raw)
-      )
+    const hash =
+      await sha256Text(raw);
+
+    await env.DB.prepare(
+      `
+      DELETE FROM sessions
+      WHERE token_hash=?
+      `
+    )
+      .bind(hash)
       .run();
   }
 
   return json(
-    { ok: true },
+    {
+      ok: true
+    },
     200,
     {
       'Set-Cookie':
@@ -826,104 +882,61 @@ async function me(
   });
 }
 
-
-async function assignNewUserVouchers(env, userId) {
-  const rows = (
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM vouchers
-         WHERE active=1
-         AND auto_assign_new_user=1`
-      )
-      .all()
-  ).results || [];
-
-  for (const v of rows) {
-    const days =
-      Math.max(
-        1,
-        Number(v.valid_days || 14)
-      );
-
-    const expires =
-      new Date(
-        Date.now() +
-        days * 86400000
-      ).toISOString();
-
-    await env.DB
-      .prepare(
-        `INSERT OR IGNORE INTO customer_vouchers
-         (
-           id,
-           user_id,
-           voucher_id,
-           assigned_at,
-           expires_at,
-           used_count
-         )
-         VALUES(?,?,?,?,?,0)`
-      )
-      .bind(
-        id(),
-        userId,
-        v.id,
-        nowIso(),
-        expires
-      )
-      .run();
-  }
-}
-
 async function getCatalog(env) {
-  const categories = (
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM categories
-         WHERE active=1
-         ORDER BY sort_order ASC,
-                  name ASC`
-      )
-      .all()
-  ).results || [];
+  const categories =
+    (
+      await env.DB.prepare(
+        `
+        SELECT *
+        FROM categories
+        WHERE active=1
+        ORDER BY sort_order ASC,
+                 name ASC
+        `
+      ).all()
+    ).results || [];
 
-  const products = (
-    await env.DB
-      .prepare(
-        `SELECT
-           p.*,
-           c.name AS category_name
-         FROM products p
-         LEFT JOIN categories c
-           ON c.id=p.category_id
-         WHERE p.active=1
-         ORDER BY p.created_at DESC`
-      )
-      .all()
-  ).results || [];
+  const products =
+    (
+      await env.DB.prepare(
+        `
+        SELECT
+          p.*,
+          c.name AS category_name
+        FROM products p
+        LEFT JOIN categories c
+          ON c.id=p.category_id
+        WHERE p.active=1
+        ORDER BY
+          p.featured DESC,
+          p.created_at DESC
+        `
+      ).all()
+    ).results || [];
 
-  const images = (
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM product_images
-         ORDER BY sort_order ASC`
-      )
-      .all()
-  ).results || [];
+  const images =
+    (
+      await env.DB.prepare(
+        `
+        SELECT *
+        FROM product_images
+        ORDER BY
+          sort_order ASC,
+          created_at ASC
+        `
+      ).all()
+    ).results || [];
 
-  const grouped = {};
+  const byProduct = {};
 
-  for (const image of images) {
-    if (!grouped[image.product_id]) {
-      grouped[image.product_id] = [];
+  for (const im of images) {
+    if (!byProduct[im.product_id]) {
+      byProduct[im.product_id] = [];
     }
 
-    grouped[image.product_id].push(
+    byProduct[im.product_id].push(
       `/api/media/${encodeURIComponent(
-        image.object_key
+        im.object_key
       )}`
     );
   }
@@ -944,8 +957,38 @@ async function getCatalog(env) {
         mix_eligible:
           !!p.mix_eligible,
         images:
-          grouped[p.id] || []
+          byProduct[p.id] || []
       }))
+  });
+}
+
+async function getPaymentSettings(
+  env
+) {
+  const o =
+    await settingMap(
+      env,
+      [
+        'bank_name',
+        'account_name',
+        'account_number',
+        'payment_qr_key'
+      ]
+    );
+
+  return json({
+    bank_name:
+      o.bank_name || '',
+    account_name:
+      o.account_name || '',
+    account_number:
+      o.account_number || '',
+    qr_url:
+      o.payment_qr_key
+        ? `/api/media/${encodeURIComponent(
+            o.payment_qr_key
+          )}`
+        : ''
   });
 }
 
@@ -953,100 +996,84 @@ async function getPublicMedia(
   env,
   key
 ) {
-  const object =
+  const obj =
     await env.MEDIA.get(key);
 
-  if (!object) {
-    throw new HttpError(
-      404,
-      'File not found'
+  if (!obj) {
+    return new Response(
+      'Not found',
+      {
+        status: 404
+      }
     );
   }
 
   const headers =
     new Headers();
 
-  object.writeHttpMetadata(
+  obj.writeHttpMetadata(
     headers
   );
 
   headers.set(
     'Cache-Control',
-    'public, max-age=86400'
+    'public, max-age=31536000, immutable'
   );
 
   return new Response(
-    object.body,
-    { headers }
+    obj.body,
+    {
+      headers
+    }
   );
-}
-
-async function getPaymentSettings(env) {
-  const settings =
-    await settingMap(
-      env,
-      [
-        'bank_name',
-        'account_name',
-        'account_number',
-        'payment_qr_key',
-        'points_enabled',
-        'points_per_rm'
-      ]
-    );
-
-  return json({
-    bank_name:
-      settings.bank_name || '',
-    account_name:
-      settings.account_name || '',
-    account_number:
-      settings.account_number || '',
-    qr_url:
-      settings.payment_qr_key
-        ? `/api/media/${encodeURIComponent(
-            settings.payment_qr_key
-          )}`
-        : '',
-    points_enabled:
-      settings.points_enabled !== '0',
-    points_per_rm:
-      Number(
-        settings.points_per_rm || 1
-      )
-  });
 }
 
 async function customerVouchers(
   env,
   userId
 ) {
-  const rows = (
-    await env.DB
-      .prepare(
-        `SELECT
-           cv.id AS customer_voucher_id,
-           cv.assigned_at,
-           cv.expires_at,
-           cv.used_count,
-           v.*
-         FROM customer_vouchers cv
-         JOIN vouchers v
-           ON v.id=cv.voucher_id
-         WHERE cv.user_id=?
-         AND v.active=1
-         AND (
-           cv.expires_at IS NULL
-           OR cv.expires_at>?
-         )
-         ORDER BY cv.assigned_at DESC`
+  const rows =
+    (
+      await env.DB.prepare(
+        `
+        SELECT
+          cv.id AS customer_voucher_id,
+          cv.assigned_at,
+          cv.expires_at,
+          cv.used_count,
+          v.*
+        FROM customer_vouchers cv
+        JOIN vouchers v
+          ON v.id=cv.voucher_id
+        WHERE
+          cv.user_id=?
+          AND v.active=1
+          AND (
+            cv.expires_at IS NULL
+            OR cv.expires_at>?
+          )
+          AND (
+            v.starts_at IS NULL
+            OR v.starts_at<=?
+          )
+          AND (
+            v.ends_at IS NULL
+            OR v.ends_at>=?
+          )
+          AND cv.used_count <
+              v.usage_limit_per_customer
+        ORDER BY
+          cv.assigned_at DESC
+        `
       )
-      .bind(
-        userId,
-        nowIso()
-      )
-      .all()
-  ).results || [];
+        .bind(
+          userId,
+          nowIso(),
+          nowIso(),
+          nowIso()
+        )
+        .all()
+    ).results || [];
 
   return json({
     vouchers:
@@ -1066,45 +1093,41 @@ async function customerVouchers(
   });
 }
 
-function orderOut(o) {
-  return {
-    ...o,
-    subtotal:
-      Number(
-        o.subtotal_cents || 0
-      ) / 100,
-    discount:
-      Number(
-        o.discount_cents || 0
-      ) / 100,
-    total:
-      Number(
-        o.total_cents || 0
-      ) / 100,
-    status:
-      o.order_status
-  };
-}
-
 async function customerOrders(
   env,
   userId
 ) {
-  const rows = (
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM orders
-         WHERE user_id=?
-         ORDER BY created_at DESC`
+  const rows =
+    (
+      await env.DB.prepare(
+        `
+        SELECT *
+        FROM orders
+        WHERE user_id=?
+        ORDER BY created_at DESC
+        `
       )
-      .bind(userId)
-      .all()
-  ).results || [];
+        .bind(userId)
+        .all()
+    ).results || [];
 
   return json({
     orders:
-      rows.map(orderOut)
+      rows.map(o => ({
+        ...o,
+        subtotal:
+          Number(
+            o.subtotal_cents
+          ) / 100,
+        discount:
+          Number(
+            o.discount_cents
+          ) / 100,
+        total:
+          Number(
+            o.total_cents
+          ) / 100
+      }))
   });
 }
 
@@ -1112,10 +1135,33 @@ async function createOrder(
   request,
   env
 ) {
-  const b =
-    await bodyJson(request);
+  const form =
+    await request.formData();
 
-  const user =
+  const rawPayload =
+    form.get('payload');
+
+  if (!rawPayload) {
+    throw new HttpError(
+      400,
+      'Order payload is missing'
+    );
+  }
+
+  let b;
+
+  try {
+    b = JSON.parse(
+      String(rawPayload)
+    );
+  } catch {
+    throw new HttpError(
+      400,
+      'Invalid order payload'
+    );
+  }
+
+  const current =
     await currentUser(
       request,
       env
@@ -1128,7 +1174,7 @@ async function createOrder(
 
   const customerEmail =
     normEmail(
-      b.customer_email || ''
+      b.customer_email
     );
 
   const customerPhone =
@@ -1146,146 +1192,226 @@ async function createOrder(
       b.pickup_time || ''
     ).trim();
 
+  const note =
+    String(
+      b.note || ''
+    ).trim();
+
+  if (!customerName) {
+    throw new HttpError(
+      400,
+      'Customer name required'
+    );
+  }
+
   if (
-    !customerName ||
     !customerPhone ||
+    customerPhone
+      .replace(/\D/g, '')
+      .length < 8
+  ) {
+    throw new HttpError(
+      400,
+      'Valid phone required'
+    );
+  }
+
+  if (
     !pickupDate ||
     !pickupTime
   ) {
     throw new HttpError(
       400,
-      'Complete your customer and pickup details'
+      'Pickup date and time required'
     );
   }
 
-  if (
-    !Array.isArray(b.items) ||
-    !b.items.length
-  ) {
+  const incomingItems =
+    Array.isArray(b.items)
+      ? b.items
+      : [];
+
+  if (!incomingItems.length) {
     throw new HttpError(
       400,
-      'Your cart is empty'
+      'Cart is empty'
     );
   }
 
-  let subtotalCents = 0;
   const orderItems = [];
+  let subtotalCents = 0;
 
-  for (const item of b.items) {
-    if (item.bundle) {
-      const bundlePrice =
-        moneyCents(item.price);
+  for (
+    const item
+    of incomingItems
+  ) {
+    if (
+      item.type === 'bundle'
+    ) {
+      const productIds =
+        Array.isArray(
+          item.product_ids
+        )
+          ? item.product_ids
+          : [];
+
+      const size =
+        productIds.length;
+
+      if (
+        !BUNDLE_SAVINGS[size]
+      ) {
+        throw new HttpError(
+          400,
+          'Invalid bundle size'
+        );
+      }
+
+      let bundleSubtotal = 0;
+
+      for (
+        const productId
+        of productIds
+      ) {
+        const product =
+          await env.DB.prepare(
+            `
+            SELECT *
+            FROM products
+            WHERE
+              id=?
+              AND active=1
+              AND mix_eligible=1
+            `
+          )
+            .bind(productId)
+            .first();
+
+        if (!product) {
+          throw new HttpError(
+            400,
+            'A Mix & Match product is unavailable'
+          );
+        }
+
+        bundleSubtotal +=
+          Number(
+            product.price_cents
+          );
+
+        orderItems.push({
+          product_id:
+            product.id,
+          product_title:
+            product.title,
+          unit_price_cents:
+            Number(
+              product.price_cents
+            ),
+          qty: 1,
+          bundle_name:
+            `${size} Box Mix & Match`
+        });
+      }
 
       subtotalCents +=
-        bundlePrice;
-
-      orderItems.push({
-        product_id: null,
-        product_title:
-          String(
-            item.name ||
-            'Mix & Match Bundle'
-          ),
-        quantity: 1,
-        unit_price_cents:
-          bundlePrice,
-        line_total_cents:
-          bundlePrice
-      });
+        Math.max(
+          0,
+          bundleSubtotal -
+          BUNDLE_SAVINGS[size]
+        );
 
       continue;
     }
 
+    const productId =
+      String(
+        item.product_id || ''
+      );
+
     const qty =
       Math.max(
         1,
-        Math.trunc(
-          Number(item.qty || 1)
+        Math.round(
+          Number(
+            item.qty || 1
+          )
         )
       );
 
     const product =
-      await env.DB
-        .prepare(
-          `SELECT *
-           FROM products
-           WHERE id=?
-           AND active=1`
-        )
-        .bind(
-          String(item.id || '')
-        )
+      await env.DB.prepare(
+        `
+        SELECT *
+        FROM products
+        WHERE
+          id=?
+          AND active=1
+        `
+      )
+        .bind(productId)
         .first();
 
     if (!product) {
       throw new HttpError(
         400,
-        'A product in your cart is no longer available'
+        'A product in your bag is unavailable'
       );
     }
 
-    const line =
+    subtotalCents +=
       Number(
         product.price_cents
       ) * qty;
-
-    subtotalCents += line;
 
     orderItems.push({
       product_id:
         product.id,
       product_title:
         product.title,
-      quantity:
-        qty,
       unit_price_cents:
         Number(
           product.price_cents
         ),
-      line_total_cents:
-        line
+      qty,
+      bundle_name:
+        null
     });
   }
 
-  let voucherId = null;
+  let voucher = null;
   let discountCents = 0;
-  let customerVoucher = null;
 
-  if (b.voucher_id) {
-    if (!user) {
-      throw new HttpError(
-        401,
-        'Login is required to use account vouchers'
-      );
-    }
-
-    customerVoucher =
-      await env.DB
-        .prepare(
-          `SELECT
-             cv.*,
-             v.code,
-             v.discount_type,
-             v.value,
-             v.min_spend_cents,
-             v.active,
-             v.usage_limit_per_customer
-           FROM customer_vouchers cv
-           JOIN vouchers v
-             ON v.id=cv.voucher_id
-           WHERE cv.user_id=?
-           AND v.id=?`
-        )
+  if (
+    current &&
+    b.voucher_id
+  ) {
+    voucher =
+      await env.DB.prepare(
+        `
+        SELECT
+          v.*,
+          cv.id AS cv_id,
+          cv.used_count,
+          cv.expires_at
+        FROM customer_vouchers cv
+        JOIN vouchers v
+          ON v.id=cv.voucher_id
+        WHERE
+          cv.user_id=?
+          AND v.id=?
+          AND v.active=1
+        `
+      )
         .bind(
-          user.id,
-          String(b.voucher_id)
+          current.id,
+          String(
+            b.voucher_id
+          )
         )
         .first();
 
-    if (
-      !customerVoucher ||
-      !customerVoucher.active
-    ) {
+    if (!voucher) {
       throw new HttpError(
         400,
         'Voucher is not available'
@@ -1293,66 +1419,59 @@ async function createOrder(
     }
 
     if (
-      customerVoucher.expires_at &&
-      customerVoucher.expires_at <
+      voucher.expires_at &&
+      voucher.expires_at <
         nowIso()
     ) {
       throw new HttpError(
         400,
-        'Voucher has expired'
+        'Voucher expired'
       );
     }
 
     if (
       Number(
-        customerVoucher.used_count || 0
+        voucher.used_count
       ) >=
       Number(
-        customerVoucher
-          .usage_limit_per_customer || 1
+        voucher.usage_limit_per_customer
       )
     ) {
       throw new HttpError(
         400,
-        'Voucher has already been used'
+        'Voucher usage limit reached'
       );
     }
 
     if (
       subtotalCents <
       Number(
-        customerVoucher
-          .min_spend_cents || 0
+        voucher.min_spend_cents
       )
     ) {
       throw new HttpError(
         400,
-        'Minimum spend has not been reached'
+        'Minimum spend not reached'
       );
     }
 
-    voucherId =
-      customerVoucher.voucher_id;
-
     if (
-      customerVoucher
-        .discount_type === 'percent'
+      voucher.discount_type ===
+      'percent'
     ) {
       discountCents =
         Math.round(
           subtotalCents *
           Number(
-            customerVoucher.value || 0
+            voucher.value
           ) /
           100
         );
     } else {
       discountCents =
-        Math.round(
-          Number(
-            customerVoucher.value || 0
-          ) * 100
-        );
+        Number(
+          voucher.value
+        ) * 100;
     }
 
     discountCents =
@@ -1380,197 +1499,379 @@ async function createOrder(
       .toString()
       .slice(-8);
 
-  const created =
+  const receipt =
+    form.get('receipt');
+
+  let receiptKey = null;
+
+  if (
+    receipt &&
+    typeof receipt === 'object' &&
+    receipt.size
+  ) {
+    if (
+      receipt.size >
+      8 * 1024 * 1024
+    ) {
+      throw new HttpError(
+        400,
+        'Receipt must be below 8MB'
+      );
+    }
+
+    receiptKey =
+      `receipts/${orderId}`;
+
+    await env.MEDIA.put(
+      receiptKey,
+      await receipt.arrayBuffer(),
+      {
+        httpMetadata: {
+          contentType:
+            receipt.type ||
+            'application/octet-stream'
+        }
+      }
+    );
+  }
+
+  const createdAt =
     nowIso();
 
-  const statements = [];
+  const inserts = [];
 
-  statements.push(
-    env.DB
-      .prepare(
-        `INSERT INTO orders
-        (
-          id,
-          order_no,
-          user_id,
-          customer_name,
-          customer_email,
-          customer_phone,
-          pickup_date,
-          pickup_time,
-          note,
-          subtotal_cents,
-          discount_cents,
-          total_cents,
-          voucher_id,
-          payment_method,
-          payment_status,
-          order_status,
-          receipt_key,
-          points_awarded,
-          created_at,
-          updated_at
-        )
-        VALUES
-        (
-          ?,?,?,?,?,?,?,?,?,?,
-          ?,?,?,?,?,?,?,0,?,?
-        )`
+  inserts.push(
+    env.DB.prepare(
+      `
+      INSERT INTO orders(
+        id,
+        order_no,
+        user_id,
+        customer_name,
+        customer_email,
+        customer_phone,
+        pickup_date,
+        pickup_time,
+        note,
+        subtotal_cents,
+        discount_cents,
+        total_cents,
+        voucher_id,
+        payment_method,
+        payment_status,
+        order_status,
+        receipt_key,
+        points_awarded,
+        created_at,
+        updated_at
       )
+      VALUES(
+        ?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+        'checking','new',?,0,?,?
+      )
+      `
+    )
       .bind(
         orderId,
         orderNo,
-        user ? user.id : null,
+        current
+          ? current.id
+          : null,
         customerName,
-        customerEmail || null,
+        customerEmail ||
+          null,
         customerPhone,
         pickupDate,
         pickupTime,
-        String(
-          b.note || ''
-        ).trim() || null,
+        note || null,
         subtotalCents,
         discountCents,
         totalCents,
-        voucherId,
-        'manual',
-        'checking',
-        'new',
-        b.receipt_key || null,
-        created,
-        created
+        voucher
+          ? voucher.id
+          : null,
+        'manual_qr',
+        receiptKey,
+        createdAt,
+        createdAt
       )
   );
 
-  for (const item of orderItems) {
-    statements.push(
-      env.DB
-        .prepare(
-          `INSERT INTO order_items
-          (
-            id,
-            order_id,
-            product_id,
-            product_title,
-            quantity,
-            unit_price_cents,
-            line_total_cents
-          )
-          VALUES(?,?,?,?,?,?,?)`
+  for (
+    const item
+    of orderItems
+  ) {
+    inserts.push(
+      env.DB.prepare(
+        `
+        INSERT INTO order_items(
+          id,
+          order_id,
+          product_id,
+          product_title,
+          unit_price_cents,
+          qty,
+          bundle_name,
+          created_at
         )
+        VALUES(
+          ?,?,?,?,?,?,?,?
+        )
+        `
+      )
         .bind(
           id(),
           orderId,
           item.product_id,
           item.product_title,
-          item.quantity,
           item.unit_price_cents,
-          item.line_total_cents
+          item.qty,
+          item.bundle_name,
+          createdAt
         )
     );
   }
 
-  if (customerVoucher) {
-    statements.push(
-      env.DB
-        .prepare(
-          `UPDATE customer_vouchers
-           SET
-             used_count =
-               used_count + 1,
-             used_at=?,
-             order_id=?
-           WHERE id=?`
-        )
+  if (voucher) {
+    inserts.push(
+      env.DB.prepare(
+        `
+        UPDATE customer_vouchers
+        SET used_count =
+          used_count + 1
+        WHERE id=?
+        `
+      )
         .bind(
-          created,
-          orderId,
-          customerVoucher.id
+          voucher.cv_id
+        )
+    );
+  }
+
+  if (current) {
+    inserts.push(
+      env.DB.prepare(
+        `
+        UPDATE users
+        SET
+          full_name=?,
+          phone=?
+        WHERE id=?
+        `
+      )
+        .bind(
+          customerName,
+          customerPhone,
+          current.id
         )
     );
   }
 
   await env.DB.batch(
-    statements
+    inserts
   );
 
   return json(
     {
       ok: true,
-      order_no: orderNo,
-      total:
-        totalCents / 100
+      order: {
+        id: orderId,
+        order_no: orderNo,
+        total:
+          totalCents / 100,
+        payment_status:
+          'checking',
+        order_status:
+          'new'
+      }
     },
     201
   );
 }
 
-async function adminDashboard(env) {
-  const products =
-    await env.DB
-      .prepare(
-        'SELECT COUNT(*) n FROM products'
-      )
-      .first();
-
-  const orders =
-    await env.DB
-      .prepare(
-        'SELECT COUNT(*) n FROM orders'
-      )
-      .first();
-
-  const customers =
-    await env.DB
-      .prepare(
-        `SELECT COUNT(*) n
-         FROM users
-         WHERE role='customer'`
-      )
-      .first();
-
+async function assignNewUserVouchers(
+  env,
+  userId
+) {
   const vouchers =
-    await env.DB
-      .prepare(
-        'SELECT COUNT(*) n FROM vouchers'
+    (
+      await env.DB.prepare(
+        `
+        SELECT *
+        FROM vouchers
+        WHERE
+          active=1
+          AND auto_assign_new_user=1
+          AND (
+            starts_at IS NULL
+            OR starts_at<=?
+          )
+          AND (
+            ends_at IS NULL
+            OR ends_at>=?
+          )
+        `
       )
-      .first();
+        .bind(
+          nowIso(),
+          nowIso()
+        )
+        .all()
+    ).results || [];
+
+  if (!vouchers.length) {
+    return;
+  }
+
+  const stmts = [];
+
+  for (
+    const v
+    of vouchers
+  ) {
+    const expires =
+      new Date(
+        Date.now() +
+        Math.max(
+          1,
+          Number(
+            v.valid_days || 14
+          )
+        ) *
+        86400000
+      ).toISOString();
+
+    stmts.push(
+      env.DB.prepare(
+        `
+        INSERT OR IGNORE INTO customer_vouchers(
+          id,
+          user_id,
+          voucher_id,
+          assigned_at,
+          expires_at,
+          used_count
+        )
+        VALUES(
+          ?,?,?,?,?,0
+        )
+        `
+      )
+        .bind(
+          id(),
+          userId,
+          v.id,
+          nowIso(),
+          expires
+        )
+    );
+  }
+
+  await env.DB.batch(
+    stmts
+  );
+}
+
+async function adminDashboard(
+  env
+) {
+  const [
+    products,
+    categories,
+    orders,
+    customers,
+    sales
+  ] = await Promise.all([
+    env.DB.prepare(
+      `
+      SELECT COUNT(*) AS n
+      FROM products
+      `
+    ).first(),
+
+    env.DB.prepare(
+      `
+      SELECT COUNT(*) AS n
+      FROM categories
+      `
+    ).first(),
+
+    env.DB.prepare(
+      `
+      SELECT COUNT(*) AS n
+      FROM orders
+      `
+    ).first(),
+
+    env.DB.prepare(
+      `
+      SELECT COUNT(*) AS n
+      FROM users
+      WHERE role='customer'
+      `
+    ).first(),
+
+    env.DB.prepare(
+      `
+      SELECT
+        COALESCE(
+          SUM(total_cents),
+          0
+        ) AS n
+      FROM orders
+      WHERE payment_status='paid'
+      `
+    ).first()
+  ]);
 
   return json({
     products:
-      Number(products.n || 0),
+      Number(
+        products?.n || 0
+      ),
+    categories:
+      Number(
+        categories?.n || 0
+      ),
     orders:
-      Number(orders.n || 0),
+      Number(
+        orders?.n || 0
+      ),
     customers:
-      Number(customers.n || 0),
-    vouchers:
-      Number(vouchers.n || 0)
+      Number(
+        customers?.n || 0
+      ),
+    sales:
+      Number(
+        sales?.n || 0
+      ) / 100
   });
 }
 
-async function adminCategories(env) {
-  const rows = (
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM categories
-         ORDER BY sort_order ASC,
-                  name ASC`
-      )
-      .all()
-  ).results || [];
+async function adminCategories(
+  env
+) {
+  const rows =
+    (
+      await env.DB.prepare(
+        `
+        SELECT *
+        FROM categories
+        ORDER BY
+          sort_order ASC,
+          name ASC
+        `
+      ).all()
+    ).results || [];
 
   return json({
-    categories: rows
+    categories:
+      rows.map(c => ({
+        ...c,
+        active:
+          !!c.active
+      }))
   });
-}
-
-function slugify(value) {
-  return String(value || '')
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
 }
 
 async function adminCreateCategory(
@@ -1592,33 +1893,33 @@ async function adminCreateCategory(
     );
   }
 
-  const categoryId = id();
+  const cid = id();
 
-  await env.DB
-    .prepare(
-      `INSERT INTO categories
-       (
-         id,
-         name,
-         slug,
-         active,
-         sort_order,
-         created_at,
-         updated_at
-       )
-       VALUES(?,?,?,?,?,?,?)`
-    )
-    .bind(
-      categoryId,
+  await env.DB.prepare(
+    `
+    INSERT INTO categories(
+      id,
       name,
-      slugify(name) +
-        '-' +
-        categoryId.slice(0, 6),
-      1,
-      Number(
-        b.sort_order || 0
+      sort_order,
+      active,
+      created_at
+    )
+    VALUES(
+      ?,?,?,?,?
+    )
+    `
+  )
+    .bind(
+      cid,
+      name,
+      Math.round(
+        Number(
+          b.sort_order || 0
+        )
       ),
-      nowIso(),
+      boolInt(
+        b.active !== false
+      ),
       nowIso()
     )
     .run();
@@ -1626,7 +1927,7 @@ async function adminCreateCategory(
   return json(
     {
       category: {
-        id: categoryId
+        id: cid
       }
     },
     201
@@ -1636,43 +1937,34 @@ async function adminCreateCategory(
 async function adminUpdateCategory(
   request,
   env,
-  categoryId
+  cid
 ) {
   const b =
     await bodyJson(request);
 
-  const name =
-    String(
-      b.name || ''
-    ).trim();
-
-  if (!name) {
-    throw new HttpError(
-      400,
-      'Category name required'
-    );
-  }
-
-  await env.DB
-    .prepare(
-      `UPDATE categories
-       SET
-         name=?,
-         active=?,
-         sort_order=?,
-         updated_at=?
-       WHERE id=?`
-    )
+  await env.DB.prepare(
+    `
+    UPDATE categories
+    SET
+      name=?,
+      sort_order=?,
+      active=?
+    WHERE id=?
+    `
+  )
     .bind(
-      name,
+      String(
+        b.name || ''
+      ).trim(),
+      Math.round(
+        Number(
+          b.sort_order || 0
+        )
+      ),
       boolInt(
         b.active !== false
       ),
-      Number(
-        b.sort_order || 0
-      ),
-      nowIso(),
-      categoryId
+      cid
     )
     .run();
 
@@ -1681,49 +1973,68 @@ async function adminUpdateCategory(
   });
 }
 
-function safeName(name) {
-  return String(
-    name || 'image'
-  )
-    .replace(
-      /[^a-zA-Z0-9._-]/g,
-      '-'
-    )
-    .slice(0, 100);
-}
+async function adminProducts(
+  env
+) {
+  const products =
+    (
+      await env.DB.prepare(
+        `
+        SELECT
+          p.*,
+          c.name AS category_name
+        FROM products p
+        LEFT JOIN categories c
+          ON c.id=p.category_id
+        ORDER BY
+          p.created_at DESC
+        `
+      ).all()
+    ).results || [];
 
-async function adminProducts(env) {
-  const rows = (
-    await env.DB
-      .prepare(
-        `SELECT
-           p.*,
-           c.name AS category_name
-         FROM products p
-         LEFT JOIN categories c
-           ON c.id=p.category_id
-         ORDER BY p.created_at DESC`
-      )
-      .all()
-  ).results || [];
+  const images =
+    (
+      await env.DB.prepare(
+        `
+        SELECT *
+        FROM product_images
+        ORDER BY
+          sort_order ASC,
+          created_at ASC
+        `
+      ).all()
+    ).results || [];
 
-  const imgs = (
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM product_images
-         ORDER BY sort_order ASC`
-      )
-      .all()
-  ).results || [];
+  const by = {};
+
+  for (
+    const im
+    of images
+  ) {
+    if (!by[im.product_id]) {
+      by[im.product_id] = [];
+    }
+
+    by[im.product_id].push({
+      id: im.id,
+      object_key:
+        im.object_key,
+      sort_order:
+        im.sort_order,
+      url:
+        `/api/media/${encodeURIComponent(
+          im.object_key
+        )}`
+    });
+  }
 
   return json({
     products:
-      rows.map(p => ({
+      products.map(p => ({
         ...p,
         price:
           Number(
-            p.price_cents
+            p.price_cents || 0
           ) / 100,
         active:
           !!p.active,
@@ -1732,19 +2043,7 @@ async function adminProducts(env) {
         mix_eligible:
           !!p.mix_eligible,
         images:
-          imgs
-            .filter(
-              i =>
-                i.product_id ===
-                p.id
-            )
-            .map(i => ({
-              id: i.id,
-              url:
-                `/api/media/${encodeURIComponent(
-                  i.object_key
-                )}`
-            }))
+          by[p.id] || []
       }))
   });
 }
@@ -1756,51 +2055,90 @@ async function adminCreateProduct(
   const b =
     await bodyJson(request);
 
-  if (
-    !String(
+  const title =
+    String(
       b.title || ''
-    ).trim()
-  ) {
+    ).trim();
+
+  if (!title) {
     throw new HttpError(
       400,
-      'Title required'
+      'Product title required'
+    );
+  }
+
+  const dupe =
+    await env.DB.prepare(
+      `
+      SELECT id
+      FROM products
+      WHERE
+        LOWER(title)=LOWER(?)
+        AND COALESCE(category_id,'')
+            =
+            COALESCE(?,'')
+      `
+    )
+      .bind(
+        title,
+        b.category_id ||
+        null
+      )
+      .first();
+
+  if (dupe) {
+    throw new HttpError(
+      409,
+      'A product with this title already exists in this category'
     );
   }
 
   const pid = id();
+  const now = nowIso();
 
-  await env.DB
-    .prepare(
-      `INSERT INTO products
-      (
-        id,
-        category_id,
-        title,
-        chinese_title,
-        description,
-        price_cents,
-        active,
-        featured,
-        mix_eligible,
-        created_at,
-        updated_at
-      )
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)`
+  await env.DB.prepare(
+    `
+    INSERT INTO products(
+      id,
+      category_id,
+      title,
+      chinese_title,
+      description,
+      price_cents,
+      active,
+      featured,
+      mix_eligible,
+      created_at,
+      updated_at
     )
+    VALUES(
+      ?,?,?,?,?,?,?,?,?,?,?
+    )
+    `
+  )
     .bind(
       pid,
-      b.category_id || null,
-      String(b.title).trim(),
-      b.chinese_title || null,
-      b.description || null,
-      moneyCents(b.price),
+      b.category_id ||
+        null,
+      title,
+      b.chinese_title ||
+        null,
+      b.description ||
+        null,
+      moneyCents(
+        b.price
+      ),
       boolInt(
         b.active !== false
       ),
-      boolInt(b.featured),
-      boolInt(b.mix_eligible),
-      nowIso(),
-      nowIso()
+      boolInt(
+        b.featured
+      ),
+      boolInt(
+        b.mix_eligible
+      ),
+      now,
+      now
     )
     .run();
 
@@ -1822,34 +2160,82 @@ async function adminUpdateProduct(
   const b =
     await bodyJson(request);
 
-  await env.DB
-    .prepare(
-      `UPDATE products
-       SET
-         category_id=?,
-         title=?,
-         chinese_title=?,
-         description=?,
-         price_cents=?,
-         active=?,
-         featured=?,
-         mix_eligible=?,
-         updated_at=?
-       WHERE id=?`
+  const title =
+    String(
+      b.title || ''
+    ).trim();
+
+  if (!title) {
+    throw new HttpError(
+      400,
+      'Product title required'
+    );
+  }
+
+  const dupe =
+    await env.DB.prepare(
+      `
+      SELECT id
+      FROM products
+      WHERE
+        id<>?
+        AND LOWER(title)=LOWER(?)
+        AND COALESCE(category_id,'')
+            =
+            COALESCE(?,'')
+      `
     )
+      .bind(
+        pid,
+        title,
+        b.category_id ||
+        null
+      )
+      .first();
+
+  if (dupe) {
+    throw new HttpError(
+      409,
+      'A product with this title already exists in this category'
+    );
+  }
+
+  await env.DB.prepare(
+    `
+    UPDATE products
+    SET
+      category_id=?,
+      title=?,
+      chinese_title=?,
+      description=?,
+      price_cents=?,
+      active=?,
+      featured=?,
+      mix_eligible=?,
+      updated_at=?
+    WHERE id=?
+    `
+  )
     .bind(
-      b.category_id || null,
-      String(
-        b.title || ''
-      ).trim(),
-      b.chinese_title || null,
-      b.description || null,
-      moneyCents(b.price),
+      b.category_id ||
+        null,
+      title,
+      b.chinese_title ||
+        null,
+      b.description ||
+        null,
+      moneyCents(
+        b.price
+      ),
       boolInt(
         b.active !== false
       ),
-      boolInt(b.featured),
-      boolInt(b.mix_eligible),
+      boolInt(
+        b.featured
+      ),
+      boolInt(
+        b.mix_eligible
+      ),
       nowIso(),
       pid
     )
@@ -1864,28 +2250,34 @@ async function adminDeleteProduct(
   env,
   pid
 ) {
-  const imgs = (
-    await env.DB
-      .prepare(
-        `SELECT object_key
-         FROM product_images
-         WHERE product_id=?`
+  const images =
+    (
+      await env.DB.prepare(
+        `
+        SELECT object_key
+        FROM product_images
+        WHERE product_id=?
+        `
       )
-      .bind(pid)
-      .all()
-  ).results || [];
+        .bind(pid)
+        .all()
+    ).results || [];
 
-  for (const im of imgs) {
+  for (
+    const im
+    of images
+  ) {
     await env.MEDIA.delete(
       im.object_key
     );
   }
 
-  await env.DB
-    .prepare(
-      `DELETE FROM products
-       WHERE id=?`
-    )
+  await env.DB.prepare(
+    `
+    DELETE FROM products
+    WHERE id=?
+    `
+  )
     .bind(pid)
     .run();
 
@@ -1898,64 +2290,89 @@ async function adminUploadProductImage(
   request,
   env
 ) {
-  const f =
+  const form =
     await request.formData();
 
   const file =
-    f.get('file');
+    form.get('file');
 
-  const pid =
+  const productId =
     String(
-      f.get('product_id') || ''
+      form.get('product_id') ||
+      ''
     );
 
-  const sort =
-    Number(
-      f.get('sort_order') || 0
+  const sortOrder =
+    Math.max(
+      0,
+      Math.min(
+        2,
+        Math.round(
+          Number(
+            form.get(
+              'sort_order'
+            ) || 0
+          )
+        )
+      )
     );
 
-  if (!file || !pid) {
+  if (
+    !file ||
+    !productId
+  ) {
     throw new HttpError(
       400,
-      'File and product required'
+      'Image and product required'
     );
   }
 
   if (
     file.size >
-    6 * 1024 * 1024
+    8 * 1024 * 1024
   ) {
     throw new HttpError(
       400,
-      'Image must be below 6MB'
+      'Image must be below 8MB'
     );
   }
 
   const count =
-    await env.DB
-      .prepare(
-        `SELECT COUNT(*) n
-         FROM product_images
-         WHERE product_id=?`
-      )
-      .bind(pid)
+    await env.DB.prepare(
+      `
+      SELECT COUNT(*) AS n
+      FROM product_images
+      WHERE product_id=?
+      `
+    )
+      .bind(productId)
       .first();
 
   if (
-    Number(count.n) >= 3
+    Number(
+      count?.n || 0
+    ) >= 3
   ) {
     throw new HttpError(
       400,
-      'Maximum 3 product images'
+      'Maximum 3 images per product'
     );
   }
 
+  const ext =
+    String(
+      file.type || ''
+    )
+      .split('/')[1]
+      ?.replace(
+        /[^a-z0-9]/gi,
+        ''
+      ) || 'jpg';
+
+  const imageId = id();
+
   const key =
-    `products/${pid}/` +
-    `${id()}-` +
-    safeName(
-      file.name || 'image'
-    );
+    `products/${productId}/${imageId}.${ext}`;
 
   await env.MEDIA.put(
     key,
@@ -1969,31 +2386,33 @@ async function adminUploadProductImage(
     }
   );
 
-  const iid = id();
-
-  await env.DB
-    .prepare(
-      `INSERT INTO product_images
-       (
-         id,
-         product_id,
-         object_key,
-         sort_order
-       )
-       VALUES(?,?,?,?)`
+  await env.DB.prepare(
+    `
+    INSERT INTO product_images(
+      id,
+      product_id,
+      object_key,
+      sort_order,
+      created_at
     )
+    VALUES(
+      ?,?,?,?,?
+    )
+    `
+  )
     .bind(
-      iid,
-      pid,
+      imageId,
+      productId,
       key,
-      sort
+      sortOrder,
+      nowIso()
     )
     .run();
 
   return json(
     {
       image: {
-        id: iid,
+        id: imageId,
         url:
           `/api/media/${encodeURIComponent(
             key
@@ -2008,54 +2427,110 @@ async function adminDeleteProductImage(
   env,
   imageId
 ) {
-  const im =
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM product_images
-         WHERE id=?`
-      )
+  const image =
+    await env.DB.prepare(
+      `
+      SELECT *
+      FROM product_images
+      WHERE id=?
+      `
+    )
       .bind(imageId)
       .first();
 
-  if (im) {
-    await env.MEDIA.delete(
-      im.object_key
+  if (!image) {
+    throw new HttpError(
+      404,
+      'Image not found'
     );
-
-    await env.DB
-      .prepare(
-        `DELETE FROM product_images
-         WHERE id=?`
-      )
-      .bind(imageId)
-      .run();
   }
+
+  await env.MEDIA.delete(
+    image.object_key
+  );
+
+  await env.DB.prepare(
+    `
+    DELETE FROM product_images
+    WHERE id=?
+    `
+  )
+    .bind(imageId)
+    .run();
 
   return json({
     ok: true
   });
 }
 
-async function adminOrders(env) {
-  const rows = (
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM orders
-         ORDER BY created_at DESC`
-      )
-      .all()
-  ).results || [];
+async function adminOrders(
+  env
+) {
+  const orders =
+    (
+      await env.DB.prepare(
+        `
+        SELECT *
+        FROM orders
+        ORDER BY
+          created_at DESC
+        `
+      ).all()
+    ).results || [];
+
+  const items =
+    (
+      await env.DB.prepare(
+        `
+        SELECT *
+        FROM order_items
+        ORDER BY
+          created_at ASC
+        `
+      ).all()
+    ).results || [];
+
+  const by = {};
+
+  for (
+    const item
+    of items
+  ) {
+    if (!by[item.order_id]) {
+      by[item.order_id] = [];
+    }
+
+    by[item.order_id].push({
+      ...item,
+      unit_price:
+        Number(
+          item.unit_price_cents
+        ) / 100
+    });
+  }
 
   return json({
     orders:
-      rows.map(o => ({
-        ...orderOut(o),
+      orders.map(o => ({
+        ...o,
+        subtotal:
+          Number(
+            o.subtotal_cents
+          ) / 100,
+        discount:
+          Number(
+            o.discount_cents
+          ) / 100,
+        total:
+          Number(
+            o.total_cents
+          ) / 100,
         receipt_url:
           o.receipt_key
             ? `/api/admin/orders/${o.id}/receipt`
-            : ''
+            : '',
+        items:
+          by[o.id] || []
       }))
   });
 }
@@ -2063,19 +2538,20 @@ async function adminOrders(env) {
 async function adminUpdateOrderStatus(
   request,
   env,
-  orderId
+  oid
 ) {
   const b =
     await bodyJson(request);
 
   const order =
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM orders
-         WHERE id=?`
-      )
-      .bind(orderId)
+    await env.DB.prepare(
+      `
+      SELECT *
+      FROM orders
+      WHERE id=?
+      `
+    )
+      .bind(oid)
       .first();
 
   if (!order) {
@@ -2085,65 +2561,54 @@ async function adminUpdateOrderStatus(
     );
   }
 
-  const pay =
-    String(
-      b.payment_status ||
-      order.payment_status
-    );
+  const paymentStatus =
+    [
+      'checking',
+      'paid',
+      'rejected'
+    ].includes(
+      b.payment_status
+    )
+      ? b.payment_status
+      : order.payment_status;
 
-  const status =
-    String(
-      b.order_status ||
-      order.order_status
-    );
+  const orderStatus =
+    [
+      'new',
+      'confirmed',
+      'preparing',
+      'ready',
+      'completed',
+      'cancelled'
+    ].includes(
+      b.order_status
+    )
+      ? b.order_status
+      : order.order_status;
 
-  const validP = [
-    'checking',
-    'paid',
-    'rejected'
-  ];
-
-  const validO = [
-    'new',
-    'confirmed',
-    'preparing',
-    'ready',
-    'completed',
-    'cancelled'
-  ];
-
-  if (
-    !validP.includes(pay) ||
-    !validO.includes(status)
-  ) {
-    throw new HttpError(
-      400,
-      'Invalid status'
-    );
-  }
-
-  const stmts = [
-    env.DB
-      .prepare(
-        `UPDATE orders
-         SET
-           payment_status=?,
-           order_status=?,
-           updated_at=?
-         WHERE id=?`
-      )
-      .bind(
-        pay,
-        status,
-        nowIso(),
-        orderId
-      )
-  ];
+  await env.DB.prepare(
+    `
+    UPDATE orders
+    SET
+      payment_status=?,
+      order_status=?,
+      updated_at=?
+    WHERE id=?
+    `
+  )
+    .bind(
+      paymentStatus,
+      orderStatus,
+      nowIso(),
+      oid
+    )
+    .run();
 
   if (
-    status === 'completed' &&
-    order.user_id &&
-    !order.points_awarded
+    paymentStatus === 'paid' &&
+    order.payment_status !==
+      'paid' &&
+    order.user_id
   ) {
     const settings =
       await settingMap(
@@ -2154,80 +2619,84 @@ async function adminUpdateOrderStatus(
         ]
       );
 
-    if (
-      settings.points_enabled !== '0'
-    ) {
-      const rate =
-        Number(
-          settings.points_per_rm || 1
-        );
+    const enabled =
+      settings.points_enabled !==
+      '0';
 
-      const pts =
-        Math.max(
-          0,
-          Math.floor(
+    const rate =
+      Math.max(
+        0,
+        Number(
+          settings.points_per_rm ||
+          1
+        )
+      );
+
+    const points =
+      enabled
+        ? Math.floor(
             (
               Number(
                 order.total_cents
               ) / 100
             ) * rate
           )
-        );
+        : 0;
 
-      if (pts > 0) {
-        stmts.push(
-          env.DB
-            .prepare(
-              `UPDATE users
-               SET points=points+?
-               WHERE id=?`
-            )
-            .bind(
-              pts,
-              order.user_id
-            )
-        );
+    if (points > 0) {
+      await env.DB.batch([
+        env.DB.prepare(
+          `
+          UPDATE users
+          SET
+            points =
+              points + ?
+          WHERE id=?
+          `
+        )
+          .bind(
+            points,
+            order.user_id
+          ),
 
-        stmts.push(
-          env.DB
-            .prepare(
-              `INSERT INTO points_ledger
-               (
-                 id,
-                 user_id,
-                 order_id,
-                 delta,
-                 reason,
-                 created_at
-               )
-               VALUES(?,?,?,?,?,?)`
-            )
-            .bind(
-              id(),
-              order.user_id,
-              order.id,
-              pts,
-              `Completed order ${order.order_no}`,
-              nowIso()
-            )
-        );
-      }
-
-      stmts.push(
-        env.DB
-          .prepare(
-            `UPDATE orders
-             SET points_awarded=1
-             WHERE id=?`
+        env.DB.prepare(
+          `
+          INSERT INTO points_ledger(
+            id,
+            user_id,
+            order_id,
+            delta,
+            reason,
+            created_at
           )
-          .bind(order.id)
-      );
+          VALUES(
+            ?,?,?,?,?,?
+          )
+          `
+        )
+          .bind(
+            id(),
+            order.user_id,
+            order.id,
+            points,
+            `Order ${order.order_no}`,
+            nowIso()
+          ),
+
+        env.DB.prepare(
+          `
+          UPDATE orders
+          SET points_awarded=?
+          WHERE id=?
+          `
+        )
+          .bind(
+            points,
+            order.id
+          )
+      ]);
     }
   }
-
-  await env.DB.batch(
-    stmts
-  );
 
   return json({
     ok: true
@@ -2236,75 +2705,114 @@ async function adminUpdateOrderStatus(
 
 async function adminReceipt(
   env,
-  orderId
+  oid
 ) {
-  const o =
-    await env.DB
-      .prepare(
-        `SELECT receipt_key
-         FROM orders
-         WHERE id=?`
-      )
-      .bind(orderId)
+  const order =
+    await env.DB.prepare(
+      `
+      SELECT receipt_key
+      FROM orders
+      WHERE id=?
+      `
+    )
+      .bind(oid)
       .first();
 
   if (
-    !o ||
-    !o.receipt_key
+    !order ||
+    !order.receipt_key
   ) {
-    throw new HttpError(
-      404,
-      'Receipt not found'
+    return new Response(
+      'Receipt not found',
+      {
+        status: 404
+      }
     );
   }
 
   const obj =
     await env.MEDIA.get(
-      o.receipt_key
+      order.receipt_key
     );
 
   if (!obj) {
-    throw new HttpError(
-      404,
-      'Receipt not found'
+    return new Response(
+      'Receipt not found',
+      {
+        status: 404
+      }
     );
   }
 
-  const h =
+  const headers =
     new Headers();
 
-  obj.writeHttpMetadata(h);
+  obj.writeHttpMetadata(
+    headers
+  );
 
-  h.set(
+  headers.set(
     'Cache-Control',
     'private, no-store'
   );
 
   return new Response(
     obj.body,
-    { headers: h }
+    {
+      headers
+    }
   );
 }
 
-async function adminCustomers(env) {
-  const rows = (
-    await env.DB
-      .prepare(
-        `SELECT
-           id,
-           email,
-           full_name,
-           points,
-           created_at
-         FROM users
-         WHERE role='customer'
-         ORDER BY created_at DESC`
-      )
-      .all()
-  ).results || [];
+async function adminCustomers(
+  env
+) {
+  const customers =
+    (
+      await env.DB.prepare(
+        `
+        SELECT
+          u.id,
+          u.email,
+          u.full_name,
+          u.phone,
+          u.points,
+          u.created_at,
+          COUNT(o.id) AS order_count,
+          COALESCE(
+            SUM(
+              CASE
+                WHEN o.payment_status='paid'
+                THEN o.total_cents
+                ELSE 0
+              END
+            ),
+            0
+          ) AS paid_spend_cents
+        FROM users u
+        LEFT JOIN orders o
+          ON o.user_id=u.id
+        WHERE u.role='customer'
+        GROUP BY u.id
+        ORDER BY
+          u.created_at DESC
+        `
+      ).all()
+    ).results || [];
 
   return json({
-    customers: rows
+    customers:
+      customers.map(c => ({
+        ...c,
+        order_count:
+          Number(
+            c.order_count || 0
+          ),
+        paid_spend:
+          Number(
+            c.paid_spend_cents || 0
+          ) / 100
+      }))
   });
 }
 
@@ -2323,27 +2831,27 @@ async function adminAdjustPoints(
       )
     );
 
-  if (
-    !Number.isFinite(delta) ||
-    delta === 0
-  ) {
+  if (!delta) {
     throw new HttpError(
       400,
-      'Enter a non-zero points adjustment'
+      'Enter a point adjustment'
     );
   }
 
-  const u =
-    await env.DB
-      .prepare(
-        `SELECT points
-         FROM users
-         WHERE id=?`
-      )
+  const row =
+    await env.DB.prepare(
+      `
+      SELECT points
+      FROM users
+      WHERE
+        id=?
+        AND role='customer'
+      `
+    )
       .bind(userId)
       .first();
 
-  if (!u) {
+  if (!row) {
     throw new HttpError(
       404,
       'Customer not found'
@@ -2353,42 +2861,49 @@ async function adminAdjustPoints(
   const next =
     Math.max(
       0,
-      Number(u.points) +
-      delta
+      Number(
+        row.points || 0
+      ) + delta
     );
 
-  const actual =
+  const actualDelta =
     next -
-    Number(u.points);
+    Number(
+      row.points || 0
+    );
 
   await env.DB.batch([
-    env.DB
-      .prepare(
-        `UPDATE users
-         SET points=?
-         WHERE id=?`
-      )
+    env.DB.prepare(
+      `
+      UPDATE users
+      SET points=?
+      WHERE id=?
+      `
+    )
       .bind(
         next,
         userId
       ),
 
-    env.DB
-      .prepare(
-        `INSERT INTO points_ledger
-         (
-           id,
-           user_id,
-           delta,
-           reason,
-           created_at
-         )
-         VALUES(?,?,?,?,?)`
+    env.DB.prepare(
+      `
+      INSERT INTO points_ledger(
+        id,
+        user_id,
+        order_id,
+        delta,
+        reason,
+        created_at
       )
+      VALUES(
+        ?,?,NULL,?,?,?
+      )
+      `
+    )
       .bind(
         id(),
         userId,
-        actual,
+        actualDelta,
         String(
           b.reason ||
           'Admin adjustment'
@@ -2410,14 +2925,16 @@ async function adminAssignVoucher(
   const b =
     await bodyJson(request);
 
-  const v =
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM vouchers
-         WHERE id=?
-         AND active=1`
-      )
+  const voucher =
+    await env.DB.prepare(
+      `
+      SELECT *
+      FROM vouchers
+      WHERE
+        id=?
+        AND active=1
+      `
+    )
       .bind(
         String(
           b.voucher_id || ''
@@ -2425,7 +2942,7 @@ async function adminAssignVoucher(
       )
       .first();
 
-  if (!v) {
+  if (!voucher) {
     throw new HttpError(
       404,
       'Voucher not found'
@@ -2438,29 +2955,32 @@ async function adminAssignVoucher(
       Math.max(
         1,
         Number(
-          v.valid_days || 14
+          voucher.valid_days ||
+          14
         )
       ) *
       86400000
     ).toISOString();
 
-  await env.DB
-    .prepare(
-      `INSERT OR IGNORE INTO customer_vouchers
-       (
-         id,
-         user_id,
-         voucher_id,
-         assigned_at,
-         expires_at,
-         used_count
-       )
-       VALUES(?,?,?,?,?,0)`
+  await env.DB.prepare(
+    `
+    INSERT OR IGNORE INTO customer_vouchers(
+      id,
+      user_id,
+      voucher_id,
+      assigned_at,
+      expires_at,
+      used_count
     )
+    VALUES(
+      ?,?,?,?,?,0
+    )
+    `
+  )
     .bind(
       id(),
       userId,
-      v.id,
+      voucher.id,
       nowIso(),
       expires
     )
@@ -2471,16 +2991,20 @@ async function adminAssignVoucher(
   });
 }
 
-async function adminVouchers(env) {
-  const rows = (
-    await env.DB
-      .prepare(
-        `SELECT *
-         FROM vouchers
-         ORDER BY created_at DESC`
-      )
-      .all()
-  ).results || [];
+async function adminVouchers(
+  env
+) {
+  const rows =
+    (
+      await env.DB.prepare(
+        `
+        SELECT *
+        FROM vouchers
+        ORDER BY
+          created_at DESC
+        `
+      ).all()
+    ).results || [];
 
   return json({
     vouchers:
@@ -2519,7 +3043,10 @@ async function adminCreateVoucher(
       b.title || ''
     ).trim();
 
-  if (!code || !title) {
+  if (
+    !code ||
+    !title
+  ) {
     throw new HttpError(
       400,
       'Code and title required'
@@ -2528,28 +3055,30 @@ async function adminCreateVoucher(
 
   const vid = id();
 
-  await env.DB
-    .prepare(
-      `INSERT INTO vouchers
-      (
-        id,
-        code,
-        title,
-        discount_type,
-        value,
-        min_spend_cents,
-        active,
-        new_user_only,
-        auto_assign_new_user,
-        valid_days,
-        starts_at,
-        ends_at,
-        usage_limit_per_customer,
-        created_at,
-        updated_at
-      )
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  await env.DB.prepare(
+    `
+    INSERT INTO vouchers(
+      id,
+      code,
+      title,
+      discount_type,
+      value,
+      min_spend_cents,
+      active,
+      new_user_only,
+      auto_assign_new_user,
+      valid_days,
+      starts_at,
+      ends_at,
+      usage_limit_per_customer,
+      created_at,
+      updated_at
     )
+    VALUES(
+      ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+    )
+    `
+  )
     .bind(
       vid,
       code,
@@ -2560,8 +3089,10 @@ async function adminCreateVoucher(
         : 'flat',
       Math.max(
         0,
-        Number(
-          b.value || 0
+        Math.round(
+          Number(
+            b.value || 0
+          )
         )
       ),
       moneyCents(
@@ -2580,12 +3111,15 @@ async function adminCreateVoucher(
         1,
         Math.round(
           Number(
-            b.valid_days || 14
+            b.valid_days ||
+            14
           )
         )
       ),
-      b.starts_at || null,
-      b.ends_at || null,
+      b.starts_at ||
+        null,
+      b.ends_at ||
+        null,
       Math.max(
         1,
         Math.round(
@@ -2618,76 +3152,72 @@ async function adminUpdateVoucher(
   const b =
     await bodyJson(request);
 
-  await env.DB
-    .prepare(
-      `UPDATE vouchers
-       SET
-         code=?,
-         title=?,
-         discount_type=?,
-         value=?,
-         min_spend_cents=?,
-         active=?,
-         new_user_only=?,
-         auto_assign_new_user=?,
-         valid_days=?,
-         starts_at=?,
-         ends_at=?,
-         usage_limit_per_customer=?,
-         updated_at=?
-       WHERE id=?`
-    )
+  await env.DB.prepare(
+    `
+    UPDATE vouchers
+    SET
+      code=?,
+      title=?,
+      discount_type=?,
+      value=?,
+      min_spend_cents=?,
+      active=?,
+      new_user_only=?,
+      auto_assign_new_user=?,
+      valid_days=?,
+      starts_at=?,
+      ends_at=?,
+      usage_limit_per_customer=?,
+      updated_at=?
+    WHERE id=?
+    `
+  )
     .bind(
       String(
         b.code || ''
       )
         .trim()
         .toUpperCase(),
-
       String(
         b.title || ''
       ).trim(),
-
       b.discount_type ===
         'percent'
         ? 'percent'
         : 'flat',
-
       Math.max(
         0,
-        Number(
-          b.value || 0
+        Math.round(
+          Number(
+            b.value || 0
+          )
         )
       ),
-
       moneyCents(
         b.min_spend
       ),
-
       boolInt(
         b.active !== false
       ),
-
       boolInt(
         b.new_user_only
       ),
-
       boolInt(
         b.auto_assign_new_user
       ),
-
       Math.max(
         1,
         Math.round(
           Number(
-            b.valid_days || 14
+            b.valid_days ||
+            14
           )
         )
       ),
-
-      b.starts_at || null,
-      b.ends_at || null,
-
+      b.starts_at ||
+        null,
+      b.ends_at ||
+        null,
       Math.max(
         1,
         Math.round(
@@ -2697,7 +3227,6 @@ async function adminUpdateVoucher(
           )
         )
       ),
-
       nowIso(),
       vid
     )
@@ -2708,33 +3237,123 @@ async function adminUpdateVoucher(
   });
 }
 
+async function adminAssignVoucherToAll(
+  env,
+  vid
+) {
+  const voucher =
+    await env.DB.prepare(
+      `
+      SELECT *
+      FROM vouchers
+      WHERE
+        id=?
+        AND active=1
+      `
+    )
+      .bind(vid)
+      .first();
+
+  if (!voucher) {
+    throw new HttpError(
+      404,
+      'Voucher not found'
+    );
+  }
+
+  const users =
+    (
+      await env.DB.prepare(
+        `
+        SELECT id
+        FROM users
+        WHERE role='customer'
+        `
+      ).all()
+    ).results || [];
+
+  const expires =
+    new Date(
+      Date.now() +
+      Math.max(
+        1,
+        Number(
+          voucher.valid_days ||
+          14
+        )
+      ) *
+      86400000
+    ).toISOString();
+
+  const stmts =
+    users.map(u =>
+      env.DB.prepare(
+        `
+        INSERT OR IGNORE INTO customer_vouchers(
+          id,
+          user_id,
+          voucher_id,
+          assigned_at,
+          expires_at,
+          used_count
+        )
+        VALUES(
+          ?,?,?,?,?,0
+        )
+        `
+      )
+        .bind(
+          id(),
+          u.id,
+          voucher.id,
+          nowIso(),
+          expires
+        )
+    );
+
+  if (stmts.length) {
+    await env.DB.batch(
+      stmts
+    );
+  }
+
+  return json({
+    ok: true,
+    assigned:
+      users.length
+  });
+}
+
 async function settingMap(
   env,
   keys
 ) {
-  const ph =
-    keys
-      .map(() => '?')
+  const placeholders =
+    keys.map(() => '?')
       .join(',');
 
-  const rows = (
-    await env.DB
-      .prepare(
-        `SELECT key,value
-         FROM settings
-         WHERE key IN (${ph})`
+  const rows =
+    (
+      await env.DB.prepare(
+        `
+        SELECT
+          key,
+          value
+        FROM settings
+        WHERE key IN(
+          ${placeholders}
+        )
+        `
       )
-      .bind(...keys)
-      .all()
-  ).results || [];
+        .bind(...keys)
+        .all()
+    ).results || [];
 
   return Object.fromEntries(
-    rows.map(
-      r => [
-        r.key,
-        r.value || ''
-      ]
-    )
+    rows.map(r => [
+      r.key,
+      r.value || ''
+    ])
   );
 }
 
@@ -2777,56 +3396,57 @@ async function adminSavePaymentSettings(
       String(
         b.bank_name || ''
       ),
-
     account_name:
       String(
         b.account_name || ''
       ),
-
     account_number:
       String(
         b.account_number || ''
       ),
-
     points_enabled:
       b.points_enabled
         ? '1'
         : '0',
-
     points_per_rm:
       String(
         Math.max(
           0,
           Number(
-            b.points_per_rm || 1
+            b.points_per_rm ||
+            1
           )
         )
       )
   };
 
   const stmts =
-    Object.entries(vals)
-      .map(([k, v]) =>
-        env.DB
-          .prepare(
-            `INSERT INTO settings
-             (
-               key,
-               value,
-               updated_at
-             )
-             VALUES(?,?,?)
-             ON CONFLICT(key)
-             DO UPDATE SET
-               value=excluded.value,
-               updated_at=excluded.updated_at`
+    Object.entries(
+      vals
+    ).map(
+      ([k, v]) =>
+        env.DB.prepare(
+          `
+          INSERT INTO settings(
+            key,
+            value,
+            updated_at
           )
+          VALUES(
+            ?,?,?
+          )
+          ON CONFLICT(key)
+          DO UPDATE SET
+            value=excluded.value,
+            updated_at=excluded.updated_at
+          `
+        )
           .bind(
             k,
             v,
             nowIso()
           )
-      );
+    );
 
   await env.DB.batch(
     stmts
@@ -2841,11 +3461,11 @@ async function adminUploadPaymentQr(
   request,
   env
 ) {
-  const f =
+  const form =
     await request.formData();
 
   const file =
-    f.get('file');
+    form.get('file');
 
   if (!file) {
     throw new HttpError(
@@ -2879,24 +3499,24 @@ async function adminUploadPaymentQr(
     }
   );
 
-  await env.DB
-    .prepare(
-      `INSERT INTO settings
-       (
-         key,
-         value,
-         updated_at
-       )
-       VALUES(
-         'payment_qr_key',
-         ?,
-         ?
-       )
-       ON CONFLICT(key)
-       DO UPDATE SET
-         value=excluded.value,
-         updated_at=excluded.updated_at`
+  await env.DB.prepare(
+    `
+    INSERT INTO settings(
+      key,
+      value,
+      updated_at
     )
+    VALUES(
+      'payment_qr_key',
+      ?,
+      ?
+    )
+    ON CONFLICT(key)
+    DO UPDATE SET
+      value=excluded.value,
+      updated_at=excluded.updated_at
+    `
+  )
     .bind(
       key,
       nowIso()
