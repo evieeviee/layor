@@ -1,6 +1,6 @@
 const SESSION_COOKIE = 'layor_session';
 const SESSION_DAYS = 30;
-const PBKDF2_ITERATIONS = 210000;
+const PBKDF2_ITERATIONS = 10000;
 const BUNDLE_SAVINGS = { 2: 400, 4: 800, 6: 1500 };
 
 export async function onRequest(context) {
