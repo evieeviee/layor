@@ -1601,35 +1601,37 @@ async function createOrder(
     const item
     of orderItems
   ) {
-    inserts.push(
-      env.DB.prepare(
-        `
-        INSERT INTO order_items(
-          id,
-          order_id,
-          product_id,
-          product_title,
-          unit_price_cents,
-          qty,
-          bundle_name,
-          created_at
-        )
-        VALUES(
-          ?,?,?,?,?,?,?,?
-        )
-        `
-      )
-        .bind(
-          id(),
-          orderId,
-          item.product_id,
-          item.product_title,
-          item.unit_price_cents,
-          item.qty,
-          item.bundle_name,
-          createdAt
-        )
-    );
+   inserts.push(
+  env.DB.prepare(
+    `
+    INSERT INTO order_items(
+      id,
+      order_id,
+      product_id,
+      product_title,
+      quantity,
+      unit_price_cents,
+      line_total_cents,
+      bundle_name,
+      created_at
+    )
+    VALUES(
+      ?,?,?,?,?,?,?,?,?
+    )
+    `
+  )
+  .bind(
+    id(),
+    orderId,
+    item.product_id,
+    item.product_title,
+    item.qty,
+    item.unit_price_cents,
+    item.unit_price_cents * item.qty,
+    item.bundle_name,
+    createdAt
+  )
+);
   }
 
   if (voucher) {
