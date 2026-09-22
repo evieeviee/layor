@@ -1676,6 +1676,7 @@ async function createOrder(
   return json(
     {
       ok: true,
+      order_no: orderNo,
       order: {
         id: orderId,
         order_no: orderNo,
@@ -2504,9 +2505,15 @@ async function adminOrders(
 
     by[item.order_id].push({
       ...item,
+      qty: Number(item.quantity || 1),
+      quantity: Number(item.quantity || 1),
       unit_price:
         Number(
-          item.unit_price_cents
+          item.unit_price_cents || 0
+        ) / 100,
+      line_total:
+        Number(
+          item.line_total_cents || 0
         ) / 100
     });
   }
