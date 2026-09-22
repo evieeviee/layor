@@ -24,7 +24,26 @@
 <script>
 let products=[],categories=[],current=null,galleryIndex=0,detailQty=1,activeCat='All',user=null,payment={};let cart=JSON.parse(localStorage.getItem('layor_cart')||'[]'),selectedVoucher=null,bundleSize=2,bundleSave=4,bundleItems=[];const fallback='data:image/svg+xml;charset=UTF-8,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800"><rect width="100%" height="100%" fill="#efe6de"/><text x="50%" y="50%" text-anchor="middle" fill="#735f50" font-family="Georgia" font-size="60">LAYOR</text></svg>');
 function money(v){return 'RM '+Number(v||0).toFixed(2)}function toast(m){const x=document.getElementById('toast');x.textContent=m;x.classList.add('on');setTimeout(()=>x.classList.remove('on'),1900)}
-async function api(path,opt={}){const res=await fetch('/api/'+path,{credentials:'same-origin',...opt});const ct=res.headers.get('content-type')||'';const d=ct.includes('application/json')?await res.json():null;if(!res.ok)throw new Error(d?.error||'Request failed');return d}
+async function api(path,opt={}){
+  const url='/api/'+String(path||'').replace(/^\/+/, '');
+  let res;
+  try{
+    res=await fetch(url,{credentials:'same-origin',...opt});
+  }catch(err){
+    console.error('Fetch error:',url,err);
+    throw new Error('Unable to connect to backend');
+  }
+  const text=await res.text();
+  let d={};
+  if(text){
+    try{d=JSON.parse(text)}catch(err){console.error('Non-JSON API response:',res.status,url,text)}
+  }
+  if(!res.ok){
+    console.error('API error:',res.status,url,text);
+    throw new Error(d?.error||d?.message||(text?`Server ${res.status}: ${text.slice(0,180)}`:`Server error (${res.status})`));
+  }
+  return d||{};
+}
 function go(id){document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));document.getElementById(id).classList.add('active');scrollTo({top:0,behavior:'smooth'});if(id==='shop')renderShop();if(id==='cart')renderCart();if(id==='checkout')renderCheckout();if(id==='account')renderAccount()}
 function saveCart(){localStorage.setItem('layor_cart',JSON.stringify(cart));document.getElementById('cartCount').textContent=cart.reduce((s,x)=>s+(x.qty||1),0)}
 async function boot(){saveCart();try{const [cat,pay]=await Promise.all([api('catalog'),api('payment')]);categories=cat.categories||[];products=cat.products||[];payment=pay||{};try{user=(await api('auth/me')).user}catch{};renderAll()}catch(e){console.error(e);toast('Backend not connected yet')} }
