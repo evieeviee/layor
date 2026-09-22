@@ -29,6 +29,14 @@ export async function onRequest(context) {
       return getPaymentSettings(env);
     }
 
+    if (
+      parts[0] === 'upload' &&
+      parts[1] === 'receipt' &&
+      method === 'POST'
+    ) {
+      return uploadReceipt(request, env);
+    }
+
     if (parts[0] === 'media' && parts[1] && method === 'GET') {
       return getPublicMedia(
         env,
@@ -1131,34 +1139,192 @@ async function customerOrders(
   });
 }
 
-async function createOrder(
+function safeFileExtension(
+  contentType,
+  fallback = 'bin'
+) {
+  const type =
+    String(contentType || '')
+      .toLowerCase();
+
+  const map = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'application/pdf': 'pdf'
+  };
+
+  return map[type] || fallback;
+}
+
+async function uploadReceipt(
   request,
   env
 ) {
   const form =
     await request.formData();
 
-  const rawPayload =
-    form.get('payload');
+  const file =
+    form.get('file');
 
-  if (!rawPayload) {
+  if (
+    !file ||
+    typeof file !== 'object' ||
+    !file.size
+  ) {
     throw new HttpError(
       400,
-      'Order payload is missing'
+      'Choose a payment receipt'
     );
   }
 
-  let b;
-
-  try {
-    b = JSON.parse(
-      String(rawPayload)
-    );
-  } catch {
+  if (
+    file.size >
+    8 * 1024 * 1024
+  ) {
     throw new HttpError(
       400,
-      'Invalid order payload'
+      'Receipt must be below 8MB'
     );
+  }
+
+  const allowed = new Set([
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/webp',
+    'application/pdf'
+  ]);
+
+  const contentType =
+    String(
+      file.type ||
+      'application/octet-stream'
+    ).toLowerCase();
+
+  if (
+    file.type &&
+    !allowed.has(contentType)
+  ) {
+    throw new HttpError(
+      400,
+      'Receipt must be JPG, PNG, WEBP or PDF'
+    );
+  }
+
+  const ext =
+    safeFileExtension(
+      contentType,
+      'bin'
+    );
+
+  const key =
+    `receipts/${id()}.${ext}`;
+
+  await env.MEDIA.put(
+    key,
+    await file.arrayBuffer(),
+    {
+      httpMetadata: {
+        contentType
+      }
+    }
+  );
+
+  return json(
+    {
+      ok: true,
+      key
+    },
+    201
+  );
+}
+
+async function createOrder(
+  request,
+  env
+) {
+  const contentType =
+    request.headers.get('content-type') || '';
+
+  let b;
+  let receiptKey = null;
+
+  if (
+    contentType.includes('application/json')
+  ) {
+    b = await bodyJson(request);
+
+    receiptKey =
+      String(
+        b.receipt_key || ''
+      ).trim() || null;
+  } else {
+    const form =
+      await request.formData();
+
+    const rawPayload =
+      form.get('payload');
+
+    if (!rawPayload) {
+      throw new HttpError(
+        400,
+        'Order payload is missing'
+      );
+    }
+
+    try {
+      b = JSON.parse(
+        String(rawPayload)
+      );
+    } catch {
+      throw new HttpError(
+        400,
+        'Invalid order payload'
+      );
+    }
+
+    const receipt =
+      form.get('receipt');
+
+    if (
+      receipt &&
+      typeof receipt === 'object' &&
+      receipt.size
+    ) {
+      if (
+        receipt.size >
+        8 * 1024 * 1024
+      ) {
+        throw new HttpError(
+          400,
+          'Receipt must be below 8MB'
+        );
+      }
+
+      const ext =
+        safeFileExtension(
+          receipt.type,
+          'jpg'
+        );
+
+      receiptKey =
+        `receipts/${id()}.${ext}`;
+
+      await env.MEDIA.put(
+        receiptKey,
+        await receipt.arrayBuffer(),
+        {
+          httpMetadata: {
+            contentType:
+              receipt.type ||
+              'application/octet-stream'
+          }
+        }
+      );
+    }
   }
 
   const current =
@@ -1499,42 +1665,6 @@ async function createOrder(
       .toString()
       .slice(-8);
 
-  const receipt =
-    form.get('receipt');
-
-  let receiptKey = null;
-
-  if (
-    receipt &&
-    typeof receipt === 'object' &&
-    receipt.size
-  ) {
-    if (
-      receipt.size >
-      8 * 1024 * 1024
-    ) {
-      throw new HttpError(
-        400,
-        'Receipt must be below 8MB'
-      );
-    }
-
-    receiptKey =
-      `receipts/${orderId}`;
-
-    await env.MEDIA.put(
-      receiptKey,
-      await receipt.arrayBuffer(),
-      {
-        httpMetadata: {
-          contentType:
-            receipt.type ||
-            'application/octet-stream'
-        }
-      }
-    );
-  }
-
   const createdAt =
     nowIso();
 
@@ -1590,7 +1720,7 @@ async function createOrder(
         voucher
           ? voucher.id
           : null,
-        'manual_qr',
+        'manual',
         receiptKey,
         createdAt,
         createdAt
